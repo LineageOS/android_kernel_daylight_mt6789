@@ -220,6 +220,9 @@ of_get_gpio_regulator_config(struct device *dev, struct device_node *np,
 				 regtype);
 	}
 
+	if (of_find_property(np, "vin-supply", NULL))
+		config->input_supply = "vin";
+
 	return config;
 }
 
@@ -255,6 +258,16 @@ static int gpio_regulator_probe(struct platform_device *pdev)
 	if (drvdata->desc.name == NULL) {
 		dev_err(dev, "Failed to allocate supply name\n");
 		return -ENOMEM;
+	}
+
+	if (config->input_supply) {
+		drvdata->desc.supply_name = devm_kstrdup(dev,
+					    config->input_supply,
+					    GFP_KERNEL);
+		if (!drvdata->desc.supply_name) {
+			dev_err(dev, "Failed to allocate input supply\n");
+			return -ENOMEM;
+		}
 	}
 
 	drvdata->gpiods = devm_kzalloc(dev, sizeof(struct gpio_desc *),

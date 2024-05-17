@@ -38,8 +38,13 @@
 #include <linux/acpi.h>
 #include <linux/of.h>
 #include <linux/regulator/consumer.h>
+#include <linux/pinctrl/consumer.h>
 
 #include <linux/platform_data/i2c-hid.h>
+
+#if IS_ENABLED(CONFIG_DRM_MEDIATEK)
+#include "mtk_disp_notify.h"
+#endif
 
 #include "../hid-ids.h"
 #include "i2c-hid.h"
@@ -159,8 +164,17 @@ struct i2c_hid {
 
 	struct i2c_hid_platform_data pdata;
 
+#if 0 /* using dts wakeup-source instead */
 	bool			irq_wake_enabled;
+#endif
 	struct mutex		reset_lock;
+#if IS_ENABLED(CONFIG_DRM_MEDIATEK)
+	struct notifier_block fb_notif;
+	bool			fb_blank_powerdown;
+#endif
+	struct pinctrl *pinctrl;
+	struct pinctrl_state *pinctrl_active;
+	struct pinctrl_state *pinctrl_sleep;
 };
 
 static const struct i2c_hid_quirks {
@@ -189,6 +203,26 @@ static const struct i2c_hid_quirks {
 		 I2C_HID_QUIRK_NO_WAKEUP_AFTER_RESET |
 		 I2C_HID_QUIRK_BOGUS_IRQ },
 	{ 0, 0 }
+};
+
+static ssize_t fwversion_show(struct device *dev,
+			     struct device_attribute *attr,
+			     char *buf)
+{
+	struct i2c_hid *ihid = i2c_get_clientdata(to_i2c_client(dev));
+
+	return sprintf(buf, "firmware version: 0x%04x", le16_to_cpu(ihid->hdesc.wVersionID));
+}
+
+static DEVICE_ATTR_RO(fwversion);
+
+static struct attribute *i2c_hid_attributes[] = {
+	&dev_attr_fwversion.attr,
+	NULL,
+};
+
+static const struct attribute_group i2c_hid_attr_group = {
+	.attrs = i2c_hid_attributes,
 };
 
 /*
@@ -844,10 +878,10 @@ static int i2c_hid_init_irq(struct i2c_client *client)
 	unsigned long irqflags = 0;
 	int ret;
 
-	dev_dbg(&client->dev, "Requesting IRQ: %d\n", client->irq);
-
 	if (!irq_get_trigger_type(client->irq))
 		irqflags = IRQF_TRIGGER_LOW;
+
+	dev_dbg(&client->dev, "Requesting IRQ: %d, irqflags:0x%lx\n", client->irq, irqflags);
 
 	ret = request_threaded_irq(client->irq, NULL, i2c_hid_irq,
 				   irqflags | IRQF_ONESHOT, client->name, ihid);
@@ -908,6 +942,133 @@ static int i2c_hid_fetch_hid_descriptor(struct i2c_hid *ihid)
 	return 0;
 }
 
+#if IS_ENABLED(CONFIG_DRM_MEDIATEK)
+static int disp_notifier_callback(struct notifier_block *self, unsigned long event, void *data)
+{
+	int *ev_data = (int *)data;
+	struct i2c_hid *ihid = container_of(self, struct i2c_hid, fb_notif);
+	struct i2c_client *client = ihid->client;
+	struct hid_device *hid = ihid->hid;
+	int ret = 0;
+
+	dev_dbg(&ihid->client->dev, "+%s(): FB EVENT: %lu\n",__func__, event);
+
+	if (!ev_data || event != MTK_DISP_EARLY_EVENT_BLANK)
+		return 0;
+
+	if (*ev_data == MTK_DISP_BLANK_POWERDOWN) {
+		if (!ihid->fb_blank_powerdown) {
+			dev_dbg(&ihid->client->dev, "%s(): notify suspend\n", __func__);
+
+			if (!device_may_wakeup(&client->dev)) {
+				if (hid->driver && hid->driver->suspend) {
+					ret = hid->driver->suspend(hid, PMSG_SUSPEND);
+					if (ret)
+						dev_err(&ihid->client->dev, "%s: hid->driver->suspend(%ps) err %d\n",
+							__func__, hid->driver->suspend, ret);
+				}
+
+				disable_irq(client->irq);
+
+				if (ihid->pinctrl_sleep) {
+					ret = pinctrl_select_state(ihid->pinctrl, ihid->pinctrl_sleep);
+					if (ret)
+						dev_err(&ihid->client->dev, "%s: unable to select pinctrl: %d\n",
+							__func__, ret);
+				}
+
+				if (ihid->pdata.reset_gpiod)
+					gpiod_set_value(ihid->pdata.reset_gpiod, 1); /* reset */
+
+				regulator_bulk_disable(ARRAY_SIZE(ihid->pdata.supplies), ihid->pdata.supplies);
+			}
+
+			ihid->fb_blank_powerdown = true;
+		}
+	} else if (*ev_data == MTK_DISP_BLANK_UNBLANK) {
+		if (ihid->fb_blank_powerdown) {
+			dev_dbg(&ihid->client->dev, "%s(): notify resume\n", __func__);
+
+			if (!device_may_wakeup(&client->dev)) {
+				if (ihid->pdata.reset_gpiod)
+					gpiod_set_value(ihid->pdata.reset_gpiod, 1); /* reset */
+
+				ret = regulator_bulk_enable(ARRAY_SIZE(ihid->pdata.supplies),
+						ihid->pdata.supplies);
+				if (ret)
+					hid_warn(hid, "%s: failed to enable supplies: %d\n", __func__, ret);
+
+				if (ihid->pinctrl_active) {
+					ret = pinctrl_select_state(ihid->pinctrl, ihid->pinctrl_active);
+					if (ret)
+						dev_err(&ihid->client->dev, "%s: unable to select pinctrl: %d\n",
+								__func__, ret);
+				}
+
+				if (ihid->pdata.reset_gpiod)
+					gpiod_set_value(ihid->pdata.reset_gpiod, 0); /* not reset */
+
+				if (ihid->pdata.post_power_delay_ms)
+					msleep(ihid->pdata.post_power_delay_ms);
+
+				enable_irq(client->irq);
+
+				if (ihid->quirks & I2C_HID_QUIRK_RESET_ON_RESUME) {
+					ret = i2c_hid_hwreset(client);
+					if (ret)
+						dev_err(&ihid->client->dev, "%s: i2c_hid_hwreset() err %d\n",
+								__func__, ret);
+				} else {
+					ret = i2c_hid_set_power(client, I2C_HID_PWR_ON);
+					if (ret)
+						dev_err(&ihid->client->dev, "%s: i2c_hid_set_power(I2C_HID_PWR_ON) err %d\n",
+								__func__, ret);
+				}
+
+				if (!ret && hid->driver && hid->driver->reset_resume) {
+					ret = hid->driver->reset_resume(hid);
+					if (ret)
+						dev_err(&ihid->client->dev, "%s: hid->driver->reset_resume(%ps) err %d\n",
+								__func__, hid->driver->reset_resume, ret);
+				}
+			}
+
+			ihid->fb_blank_powerdown = false;
+		}
+	}
+
+	dev_dbg(&client->dev, "-%s(): ret=%d\n", __func__, ret);
+
+	return 0;
+}
+
+static int register_notifier(struct i2c_hid *ihid)
+{
+	int ret = 0;
+
+	dev_dbg(&ihid->client->dev, "+%s()\n", __func__);
+	ihid->fb_blank_powerdown = false;
+	ihid->fb_notif.notifier_call = disp_notifier_callback;
+	ret = mtk_disp_notifier_register("wacom", &ihid->fb_notif);
+	if (ret)
+		dev_err(&ihid->client->dev, "Unable to reigster fb_notifier: %d\n", ret);
+
+	return ret;
+}
+
+static int release_notifier(struct i2c_hid *ihid)
+{
+	int ret = 0;
+
+	dev_dbg(&ihid->client->dev, "+%s()\n", __func__);
+	ret = mtk_disp_notifier_unregister(&ihid->fb_notif);
+	if (ret)
+		dev_err(&ihid->client->dev, "Unable to release fb_notifier: %d\n", ret);
+
+	return ret;
+}
+#endif
+
 #ifdef CONFIG_ACPI
 static const struct acpi_device_id i2c_hid_acpi_blacklist[] = {
 	/*
@@ -927,6 +1088,8 @@ static int i2c_hid_acpi_pdata(struct i2c_client *client,
 	union acpi_object *obj;
 	struct acpi_device *adev;
 	acpi_handle handle;
+
+	dev_dbg(&client->dev, "%s: +%s()\n", __func__);
 
 	handle = ACPI_HANDLE(&client->dev);
 	if (!handle || acpi_bus_get_device(handle, &adev)) {
@@ -1000,6 +1163,8 @@ static int i2c_hid_of_probe(struct i2c_client *client,
 	u32 val;
 	int ret;
 
+	dev_dbg(&client->dev, "+%s()\n", __func__);
+
 	ret = of_property_read_u32(dev->of_node, "hid-descr-addr", &val);
 	if (ret) {
 		dev_err(&client->dev, "HID register address not provided\n");
@@ -1032,6 +1197,13 @@ static void i2c_hid_fwnode_probe(struct i2c_client *client,
 				 struct i2c_hid_platform_data *pdata)
 {
 	u32 val;
+	dev_dbg(&client->dev, "+%s()\n", __func__);
+
+	pdata->reset_gpiod = devm_gpiod_get_optional(&client->dev, "reset", GPIOD_OUT_HIGH); /* reset */
+	if (IS_ERR(pdata->reset_gpiod)) {
+		dev_err(&client->dev, "get reset gpio err: %d\n", PTR_ERR(pdata->reset_gpiod));
+		pdata->reset_gpiod = NULL;
+	}
 
 	if (!device_property_read_u32(&client->dev, "post-power-on-delay-ms",
 				      &val))
@@ -1046,6 +1218,8 @@ static int i2c_hid_probe(struct i2c_client *client,
 	struct hid_device *hid;
 	__u16 hidRegister;
 	struct i2c_hid_platform_data *platform_data = client->dev.platform_data;
+
+	dev_dbg(&client->dev, "+%s()\n", __func__);
 
 	dbg_hid("HID probe called for i2c 0x%02x\n", client->addr);
 
@@ -1084,16 +1258,47 @@ static int i2c_hid_probe(struct i2c_client *client,
 	ihid->pdata.supplies[0].supply = "vdd";
 	ihid->pdata.supplies[1].supply = "vddl";
 
+	dev_dbg(&client->dev, "%s():get regulator\n", __func__);
 	ret = devm_regulator_bulk_get(&client->dev,
 				      ARRAY_SIZE(ihid->pdata.supplies),
 				      ihid->pdata.supplies);
 	if (ret)
 		return ret;
 
+	dev_dbg(&client->dev, "%s():enable regulator\n", __func__);
 	ret = regulator_bulk_enable(ARRAY_SIZE(ihid->pdata.supplies),
 				    ihid->pdata.supplies);
 	if (ret < 0)
 		return ret;
+
+	ihid->pinctrl = devm_pinctrl_get(&client->dev);
+	if (IS_ERR_OR_NULL(ihid->pinctrl)) {
+		if (IS_ERR(ihid->pinctrl)) {
+			dev_err(&client->dev, "unable get pinctrl: %d\n", ihid->pinctrl);
+			ihid->pinctrl = NULL;
+		}
+	} else {
+		ihid->pinctrl_active = pinctrl_lookup_state(ihid->pinctrl, "active");
+		if (IS_ERR(ihid->pinctrl_active)) {
+			dev_err(&client->dev, "unable lookup pinctrl state: %d\n", ihid->pinctrl_active);
+			ihid->pinctrl_active = NULL;
+		}
+		ihid->pinctrl_sleep = pinctrl_lookup_state(ihid->pinctrl, "sleep");
+		if (IS_ERR(ihid->pinctrl_sleep)) {
+			dev_err(&client->dev, "unable lookup pinctrl state: %d\n", ihid->pinctrl_sleep);
+			ihid->pinctrl_sleep = NULL;
+		}
+	}
+	if (ihid->pinctrl_active) {
+		ret = pinctrl_select_state(ihid->pinctrl, ihid->pinctrl_active);
+		if (ret)
+			dev_err(&client->dev, "unable to select pinctrl: %d\n", ret);
+	}
+
+	if (ihid->pdata.reset_gpiod){
+		dev_dbg(&client->dev, "%s: power on reset\n", __func__);
+		gpiod_set_value(ihid->pdata.reset_gpiod, 0); /* not reset */
+	}
 
 	if (ihid->pdata.post_power_delay_ms)
 		msleep(ihid->pdata.post_power_delay_ms);
@@ -1121,22 +1326,26 @@ static int i2c_hid_probe(struct i2c_client *client,
 
 	device_enable_async_suspend(&client->dev);
 
+	dev_dbg(&client->dev, "%s():i2c_smbus_read_byte\n", __func__);
 	/* Make sure there is something at this address */
 	ret = i2c_smbus_read_byte(client);
 	if (ret < 0) {
-		dev_dbg(&client->dev, "nothing at this address: %d\n", ret);
+		dev_err(&client->dev, "nothing at this address: %d\n", ret);
 		ret = -ENXIO;
 		goto err_regulator;
 	}
 
+	dev_dbg(&client->dev, "%s():i2c_hid_fetch_hid_descriptor\n", __func__);
 	ret = i2c_hid_fetch_hid_descriptor(ihid);
 	if (ret < 0)
 		goto err_regulator;
 
+	dev_dbg(&client->dev, "%s():i2c_hid_init_irq\n", __func__);
 	ret = i2c_hid_init_irq(client);
 	if (ret < 0)
 		goto err_regulator;
 
+	dev_dbg(&client->dev, "%s():hid_allocate_device\n", __func__);
 	hid = hid_allocate_device();
 	if (IS_ERR(hid)) {
 		ret = PTR_ERR(hid);
@@ -1159,12 +1368,34 @@ static int i2c_hid_probe(struct i2c_client *client,
 
 	ihid->quirks = i2c_hid_lookup_quirk(hid->vendor, hid->product);
 
+	dev_dbg(&client->dev, "%s():hid_add_device, version: 0x%lx, vendor: 0x%lx, product: 0x%lx\n", __func__, hid->version, hid->vendor, hid->product);
 	ret = hid_add_device(hid);
 	if (ret) {
 		if (ret != -ENODEV)
 			hid_err(client, "can't add hid device: %d\n", ret);
 		goto err_mem_free;
 	}
+
+	if (device_property_read_bool(&client->dev, "touchscreen-inverted-x")) {
+		dev_dbg(&client->dev, "%s(): touchscreen-inverted-x = true\n", __func__);
+		hid->quirks |= HID_QUIRK_X_INVERT;
+	}
+	if (device_property_read_bool(&client->dev, "touchscreen-inverted-y")) {
+		dev_dbg(&client->dev, "%s(): touchscreen-inverted-y = true\n", __func__);
+		hid->quirks |= HID_QUIRK_Y_INVERT;
+	}
+
+#if IS_ENABLED(CONFIG_DRM_MEDIATEK)
+	ret = register_notifier(ihid);
+	if (ret)
+		goto err_mem_free;
+#endif
+
+	hid_notice(hid, "firmware version: 0x%04x\n", le16_to_cpu(ihid->hdesc.wVersionID));
+
+	ret = sysfs_create_group(&client->dev.kobj, &i2c_hid_attr_group);
+	if (ret)
+		dev_err(&client->dev, "sysfs create failed(%d)", ret);
 
 	return 0;
 
@@ -1186,6 +1417,8 @@ static int i2c_hid_remove(struct i2c_client *client)
 	struct i2c_hid *ihid = i2c_get_clientdata(client);
 	struct hid_device *hid;
 
+	sysfs_remove_group(&client->dev.kobj, &i2c_hid_attr_group);
+
 	hid = ihid->hid;
 	hid_destroy_device(hid);
 
@@ -1193,6 +1426,10 @@ static int i2c_hid_remove(struct i2c_client *client)
 
 	if (ihid->bufsize)
 		i2c_hid_free_buffers(ihid);
+
+#if IS_ENABLED(CONFIG_DRM_MEDIATEK)
+	release_notifier(ihid);
+#endif
 
 	regulator_bulk_disable(ARRAY_SIZE(ihid->pdata.supplies),
 			       ihid->pdata.supplies);
@@ -1210,38 +1447,40 @@ static void i2c_hid_shutdown(struct i2c_client *client)
 	i2c_hid_acpi_shutdown(&client->dev);
 }
 
-#ifdef CONFIG_PM_SLEEP
 static int i2c_hid_suspend(struct device *dev)
 {
 	struct i2c_client *client = to_i2c_client(dev);
 	struct i2c_hid *ihid = i2c_get_clientdata(client);
 	struct hid_device *hid = ihid->hid;
 	int ret;
+#if 0 /* using dts wakeup-source instead */
 	int wake_status;
+#endif
 
-	if (hid->driver && hid->driver->suspend) {
-		ret = hid->driver->suspend(hid, PMSG_SUSPEND);
-		if (ret < 0)
-			return ret;
-	}
-
-	/* Save some power */
-	i2c_hid_set_power(client, I2C_HID_PWR_SLEEP);
-
-	disable_irq(client->irq);
+	dev_dbg(&client->dev, "+%s()\n", __func__);
 
 	if (device_may_wakeup(&client->dev)) {
+		if (hid->driver && hid->driver->suspend) {
+			ret = hid->driver->suspend(hid, PMSG_SUSPEND);
+			if (ret < 0)
+				return ret;
+		}
+		/* Save some power */
+		i2c_hid_set_power(client, I2C_HID_PWR_SLEEP);
+
+		disable_irq(client->irq);
+
+#if 0 /* using dts wakeup-source instead */
 		wake_status = enable_irq_wake(client->irq);
 		if (!wake_status)
 			ihid->irq_wake_enabled = true;
 		else
 			hid_warn(hid, "Failed to enable irq wake: %d\n",
 				wake_status);
-	} else {
-		regulator_bulk_disable(ARRAY_SIZE(ihid->pdata.supplies),
-				       ihid->pdata.supplies);
+#endif
 	}
 
+	dev_dbg(&client->dev, "-%s()\n", __func__);
 	return 0;
 }
 
@@ -1251,51 +1490,49 @@ static int i2c_hid_resume(struct device *dev)
 	struct i2c_client *client = to_i2c_client(dev);
 	struct i2c_hid *ihid = i2c_get_clientdata(client);
 	struct hid_device *hid = ihid->hid;
+#if 0 /* using dts wakeup-source instead */
 	int wake_status;
+#endif
 
-	if (!device_may_wakeup(&client->dev)) {
-		ret = regulator_bulk_enable(ARRAY_SIZE(ihid->pdata.supplies),
-					    ihid->pdata.supplies);
-		if (ret)
-			hid_warn(hid, "Failed to enable supplies: %d\n", ret);
+	dev_dbg(&client->dev, "+%s()\n", __func__);
 
-		if (ihid->pdata.post_power_delay_ms)
-			msleep(ihid->pdata.post_power_delay_ms);
-	} else if (ihid->irq_wake_enabled) {
+	if (device_may_wakeup(&client->dev)) {
+#if 0 /* using dts wakeup-source instead */
 		wake_status = disable_irq_wake(client->irq);
 		if (!wake_status)
 			ihid->irq_wake_enabled = false;
 		else
 			hid_warn(hid, "Failed to disable irq wake: %d\n",
 				wake_status);
+#endif
+
+		enable_irq(client->irq);
+
+		/* Instead of resetting device, simply powers the device on. This
+		 * solves "incomplete reports" on Raydium devices 2386:3118 and
+		 * 2386:4B33 and fixes various SIS touchscreens no longer sending
+		 * data after a suspend/resume.
+		 *
+		 * However some ALPS touchpads generate IRQ storm without reset, so
+		 * let's still reset them here.
+		 */
+		if (ihid->quirks & I2C_HID_QUIRK_RESET_ON_RESUME)
+			ret = i2c_hid_hwreset(client);
+		else
+			ret = i2c_hid_set_power(client, I2C_HID_PWR_ON);
+
+		if (ret)
+			return ret;
+
+		if (hid->driver && hid->driver->reset_resume) {
+			ret = hid->driver->reset_resume(hid);
+			return ret;
+		}
 	}
 
-	enable_irq(client->irq);
-
-	/* Instead of resetting device, simply powers the device on. This
-	 * solves "incomplete reports" on Raydium devices 2386:3118 and
-	 * 2386:4B33 and fixes various SIS touchscreens no longer sending
-	 * data after a suspend/resume.
-	 *
-	 * However some ALPS touchpads generate IRQ storm without reset, so
-	 * let's still reset them here.
-	 */
-	if (ihid->quirks & I2C_HID_QUIRK_RESET_ON_RESUME)
-		ret = i2c_hid_hwreset(client);
-	else
-		ret = i2c_hid_set_power(client, I2C_HID_PWR_ON);
-
-	if (ret)
-		return ret;
-
-	if (hid->driver && hid->driver->reset_resume) {
-		ret = hid->driver->reset_resume(hid);
-		return ret;
-	}
-
+	dev_dbg(&client->dev, "-%s()\n", __func__);
 	return 0;
 }
-#endif
 
 static const struct dev_pm_ops i2c_hid_pm = {
 	SET_SYSTEM_SLEEP_PM_OPS(i2c_hid_suspend, i2c_hid_resume)

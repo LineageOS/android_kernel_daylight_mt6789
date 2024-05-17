@@ -33,8 +33,10 @@ static int bq27xxx_battery_i2c_read(struct bq27xxx_device_info *di, u8 reg,
 	u8 data[2];
 	int ret;
 
-	if (!client->adapter)
+	if (!client->adapter) {
+		dev_err(di->dev, "%s: no client->adapter found\n", __func__);
 		return -ENODEV;
+	}
 
 	msg[0].addr = client->addr;
 	msg[0].flags = 0;
@@ -49,8 +51,10 @@ static int bq27xxx_battery_i2c_read(struct bq27xxx_device_info *di, u8 reg,
 		msg[1].len = 2;
 
 	ret = i2c_transfer(client->adapter, msg, ARRAY_SIZE(msg));
-	if (ret < 0)
+	if (ret < 0) {
+		dev_err(di->dev, "%s: i2c_transfer error ret=%d\n", __func__, ret);
 		return ret;
+	}
 
 	if (!single)
 		ret = get_unaligned_le16(data);
@@ -85,10 +89,14 @@ static int bq27xxx_battery_i2c_write(struct bq27xxx_device_info *di, u8 reg,
 	msg.flags = 0;
 
 	ret = i2c_transfer(client->adapter, &msg, 1);
-	if (ret < 0)
+	if (ret < 0) {
+		dev_err(di->dev, "%s: i2c_transfer error ret=%d\n", __func__, ret);
 		return ret;
-	if (ret != 1)
+	}
+	if (ret != 1) {
+		dev_err(di->dev, "%s: i2c_transfer error invalid len=%d\n", __func__, ret);
 		return -EINVAL;
+	}
 	return 0;
 }
 
@@ -102,10 +110,14 @@ static int bq27xxx_battery_i2c_bulk_read(struct bq27xxx_device_info *di, u8 reg,
 		return -ENODEV;
 
 	ret = i2c_smbus_read_i2c_block_data(client, reg, len, data);
-	if (ret < 0)
+	if (ret < 0) {
+		dev_err(di->dev, "%s: bulk transfer error, ret=%d\n", __func__, ret);
 		return ret;
-	if (ret != len)
+	}
+	if (ret != len) {
+		dev_err(di->dev, "%s: bulk transfer error, len=%d != ret=%d\n",	__func__, len, ret);
 		return -EINVAL;
+	}
 	return 0;
 }
 
@@ -129,10 +141,14 @@ static int bq27xxx_battery_i2c_bulk_write(struct bq27xxx_device_info *di,
 	msg.len = len + 1;
 
 	ret = i2c_transfer(client->adapter, &msg, 1);
-	if (ret < 0)
+	if (ret < 0) {
+		dev_err(di->dev, "%s: bulk transfer error, ret=%d\n", __func__, ret);
 		return ret;
-	if (ret != 1)
+	}
+	if (ret != 1) {
+		dev_err(di->dev, "%s: bulk transfer error, 1 != ret=%d\n", __func__, ret);
 		return -EINVAL;
+	}
 	return 0;
 }
 
@@ -162,7 +178,12 @@ static int bq27xxx_battery_i2c_probe(struct i2c_client *client,
 	di->id = num;
 	di->dev = &client->dev;
 	di->chip = id->driver_data;
+//#ifdef CONFIG_MTK_DISABLE_GAUGE
+#if 1
+	di->name = "battery";
+#else
 	di->name = name;
+#endif
 
 	di->bus.read = bq27xxx_battery_i2c_read;
 	di->bus.write = bq27xxx_battery_i2c_write;
@@ -250,6 +271,7 @@ static const struct i2c_device_id bq27xxx_i2c_id_table[] = {
 	{ "bq27z561", BQ27Z561 },
 	{ "bq28z610", BQ28Z610 },
 	{ "bq34z100", BQ34Z100 },
+	{ "bq78z100", BQ78Z100 },
 	{},
 };
 MODULE_DEVICE_TABLE(i2c, bq27xxx_i2c_id_table);
@@ -286,6 +308,7 @@ static const struct of_device_id bq27xxx_battery_i2c_of_match_table[] = {
 	{ .compatible = "ti,bq27z561" },
 	{ .compatible = "ti,bq28z610" },
 	{ .compatible = "ti,bq34z100" },
+	{ .compatible = "ti,bq78z100" },
 	{},
 };
 MODULE_DEVICE_TABLE(of, bq27xxx_battery_i2c_of_match_table);

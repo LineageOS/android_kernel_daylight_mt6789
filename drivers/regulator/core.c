@@ -41,8 +41,13 @@
 	pr_warn("%s: " fmt, rdev_get_name(rdev), ##__VA_ARGS__)
 #define rdev_info(rdev, fmt, ...)					\
 	pr_info("%s: " fmt, rdev_get_name(rdev), ##__VA_ARGS__)
+#if defined(DEBUG) || defined(CONFIG_REGULATOR_VERBOSE_DEBUG)
+#define rdev_dbg(rdev, fmt, ...)					\
+	pr_info("%s: " fmt, rdev_get_name(rdev), ##__VA_ARGS__)
+#else
 #define rdev_dbg(rdev, fmt, ...)					\
 	pr_debug("%s: " fmt, rdev_get_name(rdev), ##__VA_ARGS__)
+#endif
 
 static DEFINE_WW_CLASS(regulator_ww_class);
 static DEFINE_MUTEX(regulator_nesting_mutex);
@@ -1508,6 +1513,11 @@ static int set_machine_constraints(struct regulator_dev *rdev)
 		if (rdev->supply &&
 		    (rdev->constraints->always_on ||
 		     !regulator_is_enabled(rdev->supply))) {
+#ifdef CONFIG_REGULATOR_VERBOSE_DEBUG
+			dev_info(rdev_get_dev(rdev), "<%s> has always_on=%d, boot_on=%d => enable supply <%s>\n",
+				rdev_get_name(rdev), rdev->constraints->always_on, rdev->constraints->boot_on,
+				rdev_get_name(rdev->supply->rdev));
+#endif
 			ret = regulator_enable(rdev->supply);
 			if (ret < 0) {
 				_regulator_put(rdev->supply);
@@ -1522,8 +1532,14 @@ static int set_machine_constraints(struct regulator_dev *rdev)
 			return ret;
 		}
 
-		if (rdev->constraints->always_on)
+		if (rdev->constraints->always_on) {
 			rdev->use_count++;
+#ifdef CONFIG_REGULATOR_VERBOSE_DEBUG
+			dev_info(rdev_get_dev(rdev), "has always_on: use_count++ <%s> = %d\n", rdev_get_name(rdev), rdev->use_count);
+		} else if (rdev->constraints->boot_on) {
+			dev_info(rdev_get_dev(rdev), "has boot_on: use_count <%s> = %d\n", rdev_get_name(rdev), rdev->use_count);
+#endif
+		}
 	}
 
 	print_constraints(rdev);
@@ -1612,13 +1628,22 @@ static int set_consumer_device_supply(struct regulator_dev *rdev,
 
 		if (strcmp(node->supply, supply) != 0)
 			continue;
-
-		pr_debug("%s: %s/%s is '%s' supply; fail %s/%s\n",
+#ifdef DEBUG
+		pr_warn("%s: %s/%s is '%s' supply; fail %s/<%s>\n",
 			 consumer_dev_name,
 			 dev_name(&node->regulator->dev),
 			 node->regulator->desc->name,
 			 supply,
 			 dev_name(&rdev->dev), rdev_get_name(rdev));
+#ifdef CONFIG_REGULATOR_VERBOSE_DEBUG
+		pr_warn("%s: %s#%d:\n  c0=%pS\n  c1=%pS\n  c2=%pS\n",
+				consumer_dev_name, __func__, __LINE__,
+				(unsigned long)__builtin_return_address(0),
+				(unsigned long)__builtin_return_address(1),
+				(unsigned long)__builtin_return_address(2));
+		//dump_stack();
+#endif
+#endif
 		goto fail;
 	}
 
@@ -1989,6 +2014,10 @@ static int regulator_resolve_supply(struct regulator_dev *rdev)
 	 * yet.  Do it now.
 	 */
 	if (rdev->use_count) {
+#ifdef CONFIG_REGULATOR_VERBOSE_DEBUG
+		dev_info(dev, "%s: <%s> has use_count %u => enable supply <%s>\n", __func__,
+			rdev_get_name(rdev), rdev->use_count, rdev_get_name(rdev->supply->rdev));
+#endif
 		ret = regulator_enable(rdev->supply);
 		if (ret < 0) {
 			_regulator_put(rdev->supply);
@@ -2028,8 +2057,13 @@ struct regulator *_regulator_get(struct device *dev, const char *id,
 		 * If regulator_dev_lookup() fails with error other
 		 * than -ENODEV our job here is done, we simply return it.
 		 */
-		if (ret != -ENODEV)
+		if (ret != -ENODEV) {
+#ifdef CONFIG_REGULATOR_VERBOSE_DEBUG
+			dev_info(dev, "%s#%d: failed to get regulator: %s (%d)\n",
+				__func__, __LINE__, id, ret);
+#endif
 			return ERR_PTR(ret);
+		}
 
 		if (!have_full_constraints()) {
 			dev_warn(dev,
@@ -2055,18 +2089,38 @@ struct regulator *_regulator_get(struct device *dev, const char *id,
 			fallthrough;
 
 		default:
+#ifdef DEBUG
+			dev_warn(dev, "%s#%d: unable to find regulator: %s (get_type %d)\n",
+				__func__, __LINE__, id, get_type);
+#ifdef CONFIG_REGULATOR_VERBOSE_DEBUG
+			dev_warn(dev, "%s#%d: %s\n  c0=%pS\n  c1=%pS\n  c2=%pS\n",
+				__func__, __LINE__, id,
+				(unsigned long)__builtin_return_address(0),
+				(unsigned long)__builtin_return_address(1),
+				(unsigned long)__builtin_return_address(2));
+			//dump_stack();
+#endif
+#endif
 			return ERR_PTR(-ENODEV);
 		}
 	}
 
 	if (rdev->exclusive) {
 		regulator = ERR_PTR(-EPERM);
+#ifdef CONFIG_REGULATOR_VERBOSE_DEBUG
+		dev_err(dev, "%s#%d: failed to get regulator: %s (-EPERM)\n",
+			__func__, __LINE__, id);
+#endif
 		put_device(&rdev->dev);
 		return regulator;
 	}
 
 	if (get_type == EXCLUSIVE_GET && rdev->open_count) {
 		regulator = ERR_PTR(-EBUSY);
+#ifdef CONFIG_REGULATOR_VERBOSE_DEBUG
+		dev_err(dev, "%s#%d: failed to get regulator: %s (-EBUSY)\n",
+			__func__, __LINE__, id);
+#endif
 		put_device(&rdev->dev);
 		return regulator;
 	}
@@ -2077,6 +2131,10 @@ struct regulator *_regulator_get(struct device *dev, const char *id,
 
 	if (ret != 0) {
 		regulator = ERR_PTR(-EPROBE_DEFER);
+#ifdef CONFIG_REGULATOR_VERBOSE_DEBUG
+		dev_err(dev, "%s#%d: failed to get regulator: %s (-EPROBE_DEFER)\n",
+			__func__, __LINE__, id);
+#endif
 		put_device(&rdev->dev);
 		return regulator;
 	}
@@ -2084,12 +2142,20 @@ struct regulator *_regulator_get(struct device *dev, const char *id,
 	ret = regulator_resolve_supply(rdev);
 	if (ret < 0) {
 		regulator = ERR_PTR(ret);
+#ifdef CONFIG_REGULATOR_VERBOSE_DEBUG
+		dev_err(dev, "%s#%d: failed to resolve supply: %s (%d)\n",
+			__func__, __LINE__, id, ret);
+#endif
 		put_device(&rdev->dev);
 		return regulator;
 	}
 
 	if (!try_module_get(rdev->owner)) {
 		regulator = ERR_PTR(-EPROBE_DEFER);
+#ifdef CONFIG_REGULATOR_VERBOSE_DEBUG
+		dev_err(dev, "%s#%d: failed to get regulator: %s (-EPROBE_DEFER)\n",
+			__func__, __LINE__, id);
+#endif
 		put_device(&rdev->dev);
 		return regulator;
 	}
@@ -2099,6 +2165,10 @@ struct regulator *_regulator_get(struct device *dev, const char *id,
 	regulator_unlock(rdev);
 	if (regulator == NULL) {
 		regulator = ERR_PTR(-ENOMEM);
+#ifdef CONFIG_REGULATOR_VERBOSE_DEBUG
+		dev_err(dev, "%s#%d: failed to get regulator: %s (-ENOMEM)\n",
+			__func__, __LINE__, id);
+#endif
 		module_put(rdev->owner);
 		put_device(&rdev->dev);
 		return regulator;
@@ -2469,9 +2539,13 @@ static int regulator_ena_gpio_ctrl(struct regulator_dev *rdev, bool enable)
 
 	if (enable) {
 		/* Enable GPIO at initial use */
-		if (pin->enable_count == 0)
+		if (pin->enable_count == 0) {
 			gpiod_set_value_cansleep(pin->gpiod, 1);
-
+#ifdef DEBUG
+			dev_info(rdev_get_dev(rdev), "<%s> (gpio#%d ACTIVE) enabled\n",
+					rdev_get_name(rdev), desc_to_gpio(pin->gpiod));
+#endif
+		}
 		pin->enable_count++;
 	} else {
 		if (pin->enable_count > 1) {
@@ -2483,6 +2557,10 @@ static int regulator_ena_gpio_ctrl(struct regulator_dev *rdev, bool enable)
 		if (pin->enable_count <= 1) {
 			gpiod_set_value_cansleep(pin->gpiod, 0);
 			pin->enable_count = 0;
+#ifdef DEBUG
+			dev_info(rdev_get_dev(rdev), "<%s> (gpio#%d INACTIVE) disabled\n",
+					rdev_get_name(rdev), desc_to_gpio(pin->gpiod));
+#endif
 		}
 	}
 
@@ -2608,9 +2686,28 @@ static int _regulator_do_enable(struct regulator_dev *rdev)
 		}
 	} else if (rdev->desc->ops->enable) {
 		ret = rdev->desc->ops->enable(rdev);
-		if (ret < 0)
+		if (ret < 0) {
+#ifdef DEBUG
+			dev_err(rdev_get_dev(rdev), "enable <%s>: %ps() err %d\n",
+				rdev_get_name(rdev), rdev->desc->ops->enable, ret);
+#endif
 			return ret;
+		}
+#ifdef DEBUG
+{
+#ifdef CONFIG_ARCH_MEDIATEK
+		const char *name = rdev_get_name(rdev);
+		if (!strcmp("vgpu", name) || !strcmp("vsram_gpu", name)) {
+			/* skipped on MTK platform */
+		} else
+#endif
+			dev_info(rdev_get_dev(rdev), "<%s> enabled\n", rdev_get_name(rdev));
+}
+#endif
 	} else {
+#ifdef DEBUG
+		dev_err(rdev_get_dev(rdev), "%s: <%s> (no ops) -EINVAL!\n", __func__, rdev_get_name(rdev));
+#endif
 		return -EINVAL;
 	}
 
@@ -2729,6 +2826,10 @@ static int _regulator_enable(struct regulator *regulator)
 	lockdep_assert_held_once(&rdev->mutex.base);
 
 	if (rdev->use_count == 0 && rdev->supply) {
+#ifdef CONFIG_REGULATOR_VERBOSE_DEBUG
+		dev_info(rdev_get_dev(rdev), "'%s' <%s> enable supply <%s>...\n",
+			regulator->supply_name, rdev_get_name(rdev), rdev_get_name(rdev->supply->rdev));
+#endif
 		ret = _regulator_enable(rdev->supply);
 		if (ret < 0)
 			return ret;
@@ -2752,6 +2853,10 @@ static int _regulator_enable(struct regulator *regulator)
 			if (!regulator_ops_is_valid(rdev,
 					REGULATOR_CHANGE_STATUS)) {
 				ret = -EPERM;
+#ifdef CONFIG_REGULATOR_VERBOSE_DEBUG
+				dev_info(rdev_get_dev(rdev), "<%s> no REGULATOR_CHANGE_STATUS => skip enable\n",
+					rdev_get_name(rdev));
+#endif
 				goto err_consumer_disable;
 			}
 
@@ -2764,11 +2869,26 @@ static int _regulator_enable(struct regulator *regulator)
 		} else if (ret < 0) {
 			rdev_err(rdev, "is_enabled() failed: %pe\n", ERR_PTR(ret));
 			goto err_consumer_disable;
+#ifdef DEBUG
+		} else {
+			dev_info(rdev_get_dev(rdev), "<%s> was enabled\n", rdev_get_name(rdev));
+#endif
 		}
 		/* Fallthrough on positive return values - already enabled */
 	}
 
 	rdev->use_count++;
+#ifdef CONFIG_REGULATOR_VERBOSE_DEBUG
+{
+#ifdef CONFIG_ARCH_MEDIATEK
+	const char *name = rdev_get_name(rdev);
+	if (!strcmp("vgpu", name) || !strcmp("vsram_gpu", name)) {
+		/* skipped on MTK platform */
+	} else
+#endif
+		dev_info(rdev_get_dev(rdev), "++ <%s> = %d\n", rdev_get_name(rdev), rdev->use_count);
+}
+#endif
 
 	return 0;
 
@@ -2799,6 +2919,19 @@ int regulator_enable(struct regulator *regulator)
 	struct ww_acquire_ctx ww_ctx;
 	int ret;
 
+#ifdef CONFIG_REGULATOR_VERBOSE_DEBUG
+{
+#ifdef CONFIG_ARCH_MEDIATEK
+	const char *name = rdev_get_name(rdev);
+	if (!strcmp("vgpu", name) || !strcmp("vsram_gpu", name)) {
+		/* skipped on MTK platform */
+	} else
+#endif
+		dev_info(rdev_get_dev(rdev), "'%s' <%s> '%pS' enabling...\n",
+			regulator->supply_name, rdev_get_name(rdev), _RET_IP_);
+}
+#endif
+
 	regulator_lock_dependent(rdev, &ww_ctx);
 	ret = _regulator_enable(regulator);
 	regulator_unlock_dependent(rdev, &ww_ctx);
@@ -2823,8 +2956,28 @@ static int _regulator_do_disable(struct regulator_dev *rdev)
 
 	} else if (rdev->desc->ops->disable) {
 		ret = rdev->desc->ops->disable(rdev);
-		if (ret != 0)
+		if (ret != 0) {
+#ifdef DEBUG
+			dev_err(rdev_get_dev(rdev), "disable <%s>: %ps() err %d\n",
+				rdev_get_name(rdev), rdev->desc->ops->disable, ret);
+#endif
 			return ret;
+		}
+#ifdef DEBUG
+{
+#ifdef CONFIG_ARCH_MEDIATEK
+		const char *name = rdev_get_name(rdev);
+		if (!strcmp("vgpu", name) || !strcmp("vsram_gpu", name)) {
+			/* skipped on MTK platform */
+		} else
+#endif
+			dev_info(rdev_get_dev(rdev), "<%s> disabled\n", rdev_get_name(rdev));
+}
+#endif
+#ifdef DEBUG
+	} else {
+		dev_info(rdev_get_dev(rdev), "<%s> disabled? (do nothing)\n", rdev_get_name(rdev));
+#endif
 	}
 
 	/* cares about last_off_jiffy only if off_on_delay is required by
@@ -2872,11 +3025,20 @@ static int _regulator_disable(struct regulator *regulator)
 			}
 			_notifier_call_chain(rdev, REGULATOR_EVENT_DISABLE,
 					NULL);
+#ifdef CONFIG_REGULATOR_VERBOSE_DEBUG
+		} else {
+			dev_info(rdev_get_dev(rdev), "<%s> no REGULATOR_CHANGE_STATUS => skip disable\n", rdev_get_name(rdev));
+#endif
 		}
 
 		rdev->use_count = 0;
 	} else if (rdev->use_count > 1) {
 		rdev->use_count--;
+#ifdef CONFIG_REGULATOR_VERBOSE_DEBUG
+		dev_info(rdev_get_dev(rdev), "-- <%s> = %d\n", rdev_get_name(rdev), rdev->use_count);
+	} else if (rdev->constraints->always_on) {
+		dev_info(rdev_get_dev(rdev), "%s: <%s> = %d (always on)\n", __func__, rdev_get_name(rdev), rdev->use_count);
+#endif
 	}
 
 	if (ret == 0)
@@ -2885,8 +3047,13 @@ static int _regulator_disable(struct regulator *regulator)
 	if (ret == 0 && rdev->coupling_desc.n_coupled > 1)
 		ret = regulator_balance_voltage(rdev, PM_SUSPEND_ON);
 
-	if (ret == 0 && rdev->use_count == 0 && rdev->supply)
+	if (ret == 0 && rdev->use_count == 0 && rdev->supply) {
+#ifdef CONFIG_REGULATOR_VERBOSE_DEBUG
+		dev_info(rdev_get_dev(rdev), "<%s> use_count 0 => disable supply <%s>\n",
+			rdev_get_name(rdev), rdev_get_name(rdev->supply->rdev));
+#endif
 		ret = _regulator_disable(rdev->supply);
+	}
 
 	return ret;
 }
@@ -2908,6 +3075,19 @@ int regulator_disable(struct regulator *regulator)
 	struct regulator_dev *rdev = regulator->rdev;
 	struct ww_acquire_ctx ww_ctx;
 	int ret;
+
+#ifdef CONFIG_REGULATOR_VERBOSE_DEBUG
+{
+#ifdef CONFIG_ARCH_MEDIATEK
+	const char *name = rdev_get_name(rdev);
+	if (!strcmp("vgpu", name) || !strcmp("vsram_gpu", name)) {
+		/* skipped on MTK platform */
+	} else
+#endif
+		dev_info(rdev_get_dev(rdev), "'%s' <%s> '%pS' disabling...\n",
+			regulator->supply_name, rdev_get_name(rdev), _RET_IP_);
+}
+#endif
 
 	regulator_lock_dependent(rdev, &ww_ctx);
 	ret = _regulator_disable(regulator);
@@ -2940,6 +3120,10 @@ static int _regulator_force_disable(struct regulator_dev *rdev)
 	_notifier_call_chain(rdev, REGULATOR_EVENT_FORCE_DISABLE |
 			REGULATOR_EVENT_DISABLE, NULL);
 
+#ifdef CONFIG_REGULATOR_VERBOSE_DEBUG
+	dev_info(rdev_get_dev(rdev), "<force disabled> <%s>\n", rdev_get_name(rdev));
+#endif
+
 	return 0;
 }
 
@@ -2958,6 +3142,11 @@ int regulator_force_disable(struct regulator *regulator)
 	struct ww_acquire_ctx ww_ctx;
 	int ret;
 
+#ifdef CONFIG_REGULATOR_VERBOSE_DEBUG
+	dev_info(rdev_get_dev(rdev), "'%s' <%s> '%pS' force disabling...\n",
+		regulator->supply_name, rdev_get_name(rdev), _RET_IP_);
+#endif
+
 	regulator_lock_dependent(rdev, &ww_ctx);
 
 	ret = _regulator_force_disable(regulator->rdev);
@@ -2970,8 +3159,13 @@ int regulator_force_disable(struct regulator *regulator)
 		ret = drms_uA_update(rdev);
 	}
 
-	if (rdev->use_count != 0 && rdev->supply)
+	if (rdev->use_count != 0 && rdev->supply) {
+#ifdef CONFIG_REGULATOR_VERBOSE_DEBUG
+		dev_info(rdev_get_dev(rdev), "%s: <%s> use_count %u => disable supply <%s>\n", __func__,
+			rdev_get_name(rdev), rdev->use_count, rdev_get_name(rdev->supply->rdev));
+#endif
 		_regulator_disable(rdev->supply);
+	}
 
 	regulator_unlock_dependent(rdev, &ww_ctx);
 
@@ -3335,6 +3529,11 @@ static int _regulator_call_set_voltage(struct regulator_dev *rdev,
 	if (ret >= 0)
 		return ret;
 
+#ifdef DEBUG
+	dev_err(rdev_get_dev(rdev), "set_voltage: <%s>: set volt: %d<-->%d mV, %ps() err %d\n",
+		rdev_get_name(rdev), min_uV / 1000, max_uV / 1000,
+		rdev->desc->ops->set_voltage, ret);
+#endif
 	_notifier_call_chain(rdev, REGULATOR_EVENT_ABORT_VOLTAGE_CHANGE,
 			     (void *)data.old_uV);
 
@@ -3359,6 +3558,11 @@ static int _regulator_call_set_voltage_sel(struct regulator_dev *rdev,
 	if (ret >= 0)
 		return ret;
 
+#ifdef DEBUG
+	dev_err(rdev_get_dev(rdev), "set_voltage_sel: <%s>: set volt: %d mV, %ps() err %d\n",
+		rdev_get_name(rdev), uV / 1000,
+		rdev->desc->ops->set_voltage_sel, ret);
+#endif
 	_notifier_call_chain(rdev, REGULATOR_EVENT_ABORT_VOLTAGE_CHANGE,
 			     (void *)data.old_uV);
 
@@ -3379,8 +3583,14 @@ static int _regulator_set_voltage_sel_step(struct regulator_dev *rdev,
 		return -EINVAL;
 
 	old_sel = ops->get_voltage_sel(rdev);
-	if (old_sel < 0)
+	if (old_sel < 0) {
+#ifdef DEBUG
+		dev_err(rdev_get_dev(rdev), "set_voltage_sel_step: <%s>: set volt: %d mV, %ps() err %d\n",
+			rdev_get_name(rdev), uV / 1000,
+			ops->get_voltage_sel, old_sel);
+#endif
 		return old_sel;
+	}
 
 	diff = new_selector - old_sel;
 	if (diff == 0)
@@ -3398,8 +3608,14 @@ static int _regulator_set_voltage_sel_step(struct regulator_dev *rdev,
 			 * below.
 			 */
 			ret = ops->set_voltage_sel(rdev, curr_sel);
-			if (ret)
+			if (ret) {
+#ifdef DEBUG
+				dev_err(rdev_get_dev(rdev), "set_voltage_sel_step: <%s>: set volt up: %d mV, %ps() err %d\n",
+					rdev_get_name(rdev), curr_sel / 1000,
+					ops->set_voltage_sel, ret);
+#endif
 				goto try_revert;
+			}
 		}
 	} else {
 		/* Stepping down. */
@@ -3407,8 +3623,14 @@ static int _regulator_set_voltage_sel_step(struct regulator_dev *rdev,
 		     curr_sel > new_selector;
 		     curr_sel -= rdev->desc->vsel_step) {
 			ret = ops->set_voltage_sel(rdev, curr_sel);
-			if (ret)
+			if (ret) {
+#ifdef DEBUG
+				dev_err(rdev_get_dev(rdev), "set_voltage_sel_step: <%s>: set volt down: %d mV, %ps() err %d\n",
+					rdev_get_name(rdev), curr_sel / 1000,
+					ops->set_voltage_sel, ret);
+#endif
 				goto try_revert;
+			}
 		}
 	}
 
@@ -3444,6 +3666,13 @@ static int _regulator_set_voltage_time(struct regulator_dev *rdev,
 		return rdev->constraints->settling_time_down;
 
 	if (ramp_delay == 0) {
+#if defined(CONFIG_REGULATOR_DEBUG) && defined(CONFIG_ARCH_MEDIATEK)
+		const char *name = rdev_get_name(rdev);
+		if (!strcmp("vproc", name) || !strcmp("vsram_proc", name) || !strncmp("dvfsrc-v", name, 8) ||
+			!strcmp("vgpu", name) || !strcmp("vsram_gpu", name)) {
+			/* skipped on MTK platform */
+		} else
+#endif
 		rdev_dbg(rdev, "ramp_delay not set\n");
 		return 0;
 	}
@@ -3474,8 +3703,14 @@ static int _regulator_do_set_voltage(struct regulator_dev *rdev,
 	if (_regulator_is_enabled(rdev) &&
 	    ops->set_voltage_time_sel && ops->get_voltage_sel) {
 		old_selector = ops->get_voltage_sel(rdev);
-		if (old_selector < 0)
+		if (old_selector < 0) {
+#ifdef DEBUG
+			dev_err(rdev_get_dev(rdev), "<%s>: set volt: %d<-->%d mV, %ps() err %d\n",
+				rdev_get_name(rdev), min_uV / 1000, max_uV / 1000,
+				rdev->desc->ops->get_voltage_sel, old_selector);
+#endif
 			return old_selector;
+		}
 	}
 
 	if (ops->set_voltage) {
@@ -3505,15 +3740,29 @@ static int _regulator_do_set_voltage(struct regulator_dev *rdev,
 					ret = _regulator_call_set_voltage_sel(
 						rdev, best_val, selector);
 			} else {
+#ifdef DEBUG
+				dev_err(rdev_get_dev(rdev), "<%s>: set volt: %d<-->%d mV, %ps() best %d mV out of range\n",
+					rdev_get_name(rdev), min_uV / 1000, max_uV / 1000,
+					rdev->desc->ops->list_voltage, best_val / 1000);
+#endif
 				ret = -EINVAL;
 			}
 		}
 	} else {
+#ifdef DEBUG
+		dev_err(rdev_get_dev(rdev), "<%s>: set volt: %d<-->%d mV, -EINVAL (no set_voltage/set_voltage_sel)\n",
+			rdev_get_name(rdev), min_uV / 1000, max_uV / 1000);
+#endif
 		ret = -EINVAL;
 	}
 
-	if (ret)
+	if (ret) {
+#ifdef DEBUG
+		dev_err(rdev_get_dev(rdev), "<%s>: set volt: %d<-->%d mV err %d\n",
+			rdev_get_name(rdev), min_uV / 1000, max_uV / 1000, ret);
+#endif
 		goto out;
+	}
 
 	if (ops->set_voltage_time_sel) {
 		/*
@@ -3550,9 +3799,27 @@ static int _regulator_do_set_voltage(struct regulator_dev *rdev,
 
 	if (best_val >= 0) {
 		unsigned long data = best_val;
+#ifdef CONFIG_REGULATOR_VERBOSE_DEBUG
+{
+#ifdef CONFIG_ARCH_MEDIATEK
+		const char *name = rdev_get_name(rdev);
+		if (!strcmp("vproc", name) || !strcmp("vsram_proc", name) || !strncmp("dvfsrc-v", name, 8) ||
+			!strcmp("vgpu", name) || !strcmp("vsram_gpu", name)) {
+			/* skipped on MTK platform */
+		} else
+#endif
+			dev_info(rdev_get_dev(rdev), "<%s>: new volt: %d mV (%d<-->%d)\n",
+				rdev_get_name(rdev), best_val / 1000, min_uV / 1000, max_uV / 1000);
+}
+#endif
 
 		_notifier_call_chain(rdev, REGULATOR_EVENT_VOLTAGE_CHANGE,
 				     (void *)data);
+#ifdef DEBUG
+	} else {
+		dev_err(rdev_get_dev(rdev), "<%s>: set volt: %d<-->%d mV: the best value is %d (err?)\n",
+			rdev_get_name(rdev), min_uV / 1000, max_uV / 1000, best_val);
+#endif
 	}
 
 out:
@@ -3621,6 +3888,10 @@ static int regulator_set_voltage_unlocked(struct regulator *regulator,
 	if (!rdev->desc->ops->set_voltage &&
 	    !rdev->desc->ops->set_voltage_sel) {
 		ret = -EINVAL;
+#ifdef DEBUG
+		dev_err(rdev_get_dev(rdev), "<%s>: set volt: %d<-->%d mV err -EINVAL (no set_voltage/set_voltage_sel)\n",
+			rdev_get_name(rdev), min_uV / 1000, max_uV / 1000);
+#endif
 		goto out;
 	}
 
@@ -3664,12 +3935,20 @@ int regulator_set_voltage_rdev(struct regulator_dev *rdev, int min_uV,
 		selector = regulator_map_voltage(rdev, min_uV, max_uV);
 		if (selector < 0) {
 			ret = selector;
+#ifdef DEBUG
+			dev_err(rdev_get_dev(rdev), "<%s>: set volt: %d<-->%d mV, regulator_map_voltage() err %d\n",
+				rdev_get_name(rdev), min_uV / 1000, max_uV / 1000, ret);
+#endif
 			goto out;
 		}
 
 		best_supply_uV = _regulator_list_voltage(rdev, selector, 0);
 		if (best_supply_uV < 0) {
 			ret = best_supply_uV;
+#ifdef DEBUG
+			dev_err(rdev_get_dev(rdev), "<%s>: set volt: %d<-->%d mV, _regulator_list_voltage() err %d\n",
+				rdev_get_name(rdev), min_uV / 1000, max_uV / 1000, ret);
+#endif
 			goto out;
 		}
 
@@ -3678,6 +3957,10 @@ int regulator_set_voltage_rdev(struct regulator_dev *rdev, int min_uV,
 		current_supply_uV = regulator_get_voltage_rdev(rdev->supply->rdev);
 		if (current_supply_uV < 0) {
 			ret = current_supply_uV;
+#ifdef DEBUG
+			dev_err(rdev_get_dev(rdev), "<%s>: set volt: %d<-->%d mV, regulator_get_voltage_rdev() err %d\n",
+				rdev_get_name(rdev), min_uV / 1000, max_uV / 1000, ret);
+#endif
 			goto out;
 		}
 
@@ -4899,6 +5182,40 @@ int regulator_mode_to_status(unsigned int mode)
 }
 EXPORT_SYMBOL_GPL(regulator_mode_to_status);
 
+#ifdef INOCO_PCBA_BUILD
+static ssize_t store_regulator_status(struct device *dev,
+				   struct device_attribute *attr, const char *buf, size_t size)
+{
+	struct regulator_dev *rdev = dev_get_drvdata(dev);
+	static int state = 0;
+	static int _use_count = 0;
+	static int ret = 0;
+
+	if (!sscanf(buf, "%d\n", &state)) {
+		if (!strncmp(buf, "enabled", sizeof("enabled") - 1))
+			state = 1;
+		else if (!strncmp(buf, "disabled", sizeof("disabled") - 1))
+			state = 0;
+		else
+			return -EINVAL;
+	}
+
+	if (state == 1)
+		ret = _regulator_do_enable(rdev);
+	else {
+		mutex_lock(&regulator_list_mutex);
+		_use_count = rdev->use_count;
+		rdev->use_count = 1;
+		ret = _regulator_force_disable(rdev);
+		rdev->use_count = _use_count;
+		mutex_unlock(&regulator_list_mutex);
+	}
+
+	return size;
+}
+static DEVICE_ATTR(status_control, 0664, regulator_state_show, store_regulator_status);
+#endif
+
 static struct attribute *regulator_dev_attrs[] = {
 	&dev_attr_name.attr,
 	&dev_attr_num_users.attr,
@@ -4923,6 +5240,9 @@ static struct attribute *regulator_dev_attrs[] = {
 	&dev_attr_suspend_standby_mode.attr,
 	&dev_attr_suspend_mem_mode.attr,
 	&dev_attr_suspend_disk_mode.attr,
+#ifdef INOCO_PCBA_BUILD
+	&dev_attr_status_control.attr,
+#endif
 	NULL
 };
 
@@ -5045,9 +5365,12 @@ static int regulator_register_resolve_supply(struct device *dev, void *data)
 {
 	struct regulator_dev *rdev = dev_to_rdev(dev);
 
-	if (regulator_resolve_supply(rdev))
+	if (regulator_resolve_supply(rdev)) {
+#if defined(CONFIG_REGULATOR_VERBOSE_DEBUG)
+		/* output only if CONFIG_REGULATOR_DEBUG and CONFIG_REGULATOR_VERBOSE_DEBUG are defined */
 		rdev_dbg(rdev, "unable to resolve supply\n");
-
+#endif
+	}
 	return 0;
 }
 
@@ -5483,11 +5806,15 @@ wash:
 	mutex_lock(&regulator_list_mutex);
 	regulator_ena_gpio_free(rdev);
 	mutex_unlock(&regulator_list_mutex);
+	put_device(&rdev->dev);
+	rdev = NULL;
 clean:
 	if (dangling_of_gpiod)
 		gpiod_put(config->ena_gpiod);
+	if (rdev && rdev->dev.of_node)
+		of_node_put(rdev->dev.of_node);
+	kfree(rdev);
 	kfree(config);
-	put_device(&rdev->dev);
 rinse:
 	if (dangling_cfg_gpiod)
 		gpiod_put(cfg->ena_gpiod);

@@ -4,6 +4,21 @@
 
 #include <linux/power_supply.h>
 
+#define BATTERY_NOTIFY_TEMP_STATUS	/* battery warning */
+
+#ifdef BATTERY_NOTIFY_TEMP_STATUS
+/* battery abnormal status (ref: mtk_charger.h (charging abnormal status)) */
+#define BAT_NORMAL_STATUS		(0)
+#define BAT_OVER_TEMP_STATUS	(1 << 1)	/* High temp */
+#define BAT_UNDER_TEMP_STATUS	(1 << 5)	/* Low temp */
+
+/* battery warning temperature thresholds */
+#define MIN_BAT_TEMP	(0)
+#define MIN_BAT_TEMP_HYSTERESIS	(6)
+#define MAX_BAT_TEMP	(50)
+#define MAX_BAT_TEMP_HYSTERESIS	(3)
+#endif
+
 enum bq27xxx_chip {
 	BQ27000 = 1, /* bq27000, bq27200 */
 	BQ27010, /* bq27010, bq27210 */
@@ -35,6 +50,7 @@ enum bq27xxx_chip {
 	BQ27Z561,
 	BQ28Z610,
 	BQ34Z100,
+	BQ78Z100,
 };
 
 struct bq27xxx_device_info;
@@ -56,6 +72,7 @@ struct bq27xxx_reg_cache {
 	int energy;
 	int flags;
 	int health;
+	int status;
 };
 
 struct bq27xxx_device_info {
@@ -74,9 +91,18 @@ struct bq27xxx_device_info {
 	union power_supply_propval last_status;
 	struct delayed_work work;
 	struct power_supply *bat;
+	struct power_supply *chg_psy;
 	struct list_head list;
 	struct mutex lock;
 	u8 *regs;
+#ifdef BATTERY_NOTIFY_TEMP_STATUS
+	/* battery warning */
+	unsigned int notify_code;
+	int min_bat_temp;
+	int min_bat_temp_hysteresis;
+	int max_bat_temp;
+	int max_bat_temp_hysteresis;
+#endif
 };
 
 void bq27xxx_battery_update(struct bq27xxx_device_info *di);

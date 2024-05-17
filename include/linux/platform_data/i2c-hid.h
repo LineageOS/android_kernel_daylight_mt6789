@@ -14,6 +14,7 @@
 
 #include <linux/regulator/consumer.h>
 #include <linux/types.h>
+#include <linux/gpio/consumer.h>
 
 /**
  * struct i2chid_platform_data - used by hid over i2c implementation.
@@ -36,6 +37,7 @@ struct i2c_hid_platform_data {
 	u16 hid_descriptor_address;
 	struct regulator_bulk_data supplies[2];
 	int post_power_delay_ms;
+	struct gpio_desc *reset_gpiod;
 };
 
 #endif /* __LINUX_I2C_HID_H */

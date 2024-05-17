@@ -150,6 +150,13 @@ scm_version()
 
 	# Check for svn and a svn repo.
 	if rev=$(LANG= LC_ALL= LC_MESSAGES=C svn info 2>/dev/null | grep '^Last Changed Rev'); then
+		# Copied from the above git script
+		if [ -n "$android_release" ] && [ -n "$kmi_generation" ]; then
+			printf '%s' "-$android_release-$kmi_generation"
+		elif [ -n "$android_release" ]; then
+			printf '%s' "-$android_release"
+		fi
+
 		rev=$(echo $rev | awk '{print $NF}')
 		printf -- '-svn%s' "$rev"
 
