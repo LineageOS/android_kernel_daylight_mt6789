@@ -50,6 +50,13 @@ ROOT_NODE {
 	hardware = "mt6789";
 };
 
+&mdp {
+	mboxes = <&gce 16 0 CMDQ_THR_PRIO_1>,
+		<&gce 17 0 CMDQ_THR_PRIO_1>,
+		<&gce 18 0 CMDQ_THR_PRIO_1>,
+		<&gce 19 0 CMDQ_THR_PRIO_1>;
+};
+
 &pio {
 	i2c2_default: i2c2_default {
 		pins_cmd_dat { /* I2C 400KHz */
