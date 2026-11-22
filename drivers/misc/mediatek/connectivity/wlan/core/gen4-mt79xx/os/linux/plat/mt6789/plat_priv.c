@@ -24,9 +24,6 @@ enum ENUM_CPU_BOOST_STATUS {
 	ENUM_CPU_BOOST_STATUS_NUM
 };
 
-#define WIPHY_PRIV(_wiphy, _priv) \
-        (_priv = *((struct GLUE_INFO **) wiphy_priv(_wiphy)))
-
 /* mimic store_rps_map as net-sysfs.c does */
 int wlan_set_rps_map(struct netdev_rx_queue *queue, unsigned long rps_value)
 {
@@ -199,11 +196,10 @@ int32_t kalBoostCpu(IN struct ADAPTER *prAdapter,
 		    IN uint32_t u4TarPerfLevel,
 		    IN uint32_t u4BoostCpuTh)
 {
-	struct GLUE_INFO *prGlueInfo = NULL;
+	struct GLUE_INFO *prGlueInfo = prAdapter->prGlueInfo;
 	int32_t i4Freq = -1;
 	static u_int8_t fgRequested = ENUM_CPU_BOOST_STATUS_INIT;
 
-	WIPHY_PRIV(wlanGetWiphy(), prGlueInfo);
 	i4Freq = (u4TarPerfLevel >= u4BoostCpuTh) ? MAX_CPU_FREQ : -1;
 
 	if (fgRequested == ENUM_CPU_BOOST_STATUS_INIT) {
