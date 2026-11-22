@@ -16,6 +16,23 @@
       "message": "Tested WPA2 + WPA2/3 + WPA3",
       "revId": "087e862e8740a8e96d72e954b2417ab5431f869e",
       "serverId": "1ec6b3db-b2c1-4fa4-84a2-4c7efe89ba71"
+    },
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "72850277_0b06583c",
+        "filename": "/PATCHSET_LEVEL",
+        "patchSetId": 1
+      },
+      "lineNbr": 0,
+      "author": {
+        "id": 24442
+      },
+      "writtenOn": "2026-11-22T11:19:58Z",
+      "side": 1,
+      "message": "https://github.com/MotorolaMobilityLLC/vendor-mediatek-kernel_modules-connectivity-wlan-core-gen4m/commit/680a3524a4bbfd39c1554e66ef53b7da50d9b562",
+      "revId": "087e862e8740a8e96d72e954b2417ab5431f869e",
+      "serverId": "1ec6b3db-b2c1-4fa4-84a2-4c7efe89ba71"
     }
   ]
 }
