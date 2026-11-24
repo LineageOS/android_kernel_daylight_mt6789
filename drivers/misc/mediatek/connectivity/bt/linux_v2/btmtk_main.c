@@ -4295,7 +4295,7 @@ unlock:
 
 		state = btmtk_get_chip_state(bdev);
 
-		if (state != BTMTK_STATE_DISCONNECT)
+		if (hdev->bus != HCI_SDIO && state != BTMTK_STATE_DISCONNECT)
 			btmtk_set_chip_state(bdev, BTMTK_STATE_CLOSED);
 
 		btmtk_fops_set_state(bdev, BTMTK_FOPS_STATE_CLOSED);
